@@ -34,20 +34,11 @@ document.addEventListener('DOMContentLoaded', () => {
       };
 
       try {
-        // تجربة المسار الأساسي أولاً، وإذا أرجع 404 يجرب /api/login
-        let res = await fetch('/login', {
+        const res = await fetch('/api/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-
-        if (res.status === 404) {
-          res = await fetch('/api/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-        }
 
         const data = await res.json();
 
@@ -58,7 +49,7 @@ document.addEventListener('DOMContentLoaded', () => {
           errorMsg.textContent = data.message || 'بيانات الدخول غير صحيحة';
         }
       } catch (err) {
-        errorMsg.textContent = 'تعذر الاتصال بالسيرفر، تأكد من تشغيل Node server (npm start أو node server.js)';
+        errorMsg.textContent = 'تعذر الاتصال بالخادم. يرجى المحاولة مرة أخرى بعد قليل.';
       } finally {
         submitBtn.disabled = false;
         submitBtn.style.opacity = '1';

@@ -1,7 +1,7 @@
 {
   "name": "liebherr-login",
   "version": "1.0.0",
-  "description": "Liebherr Experts login page with MySQL authentication",
+  "description": "Liebherr crane management with Netlify Database",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,11 +9,12 @@
   },
   "dependencies": {
     "@netlify/database": "^2.0.1",
+    "@netlify/functions": "^6.0.2",
     "bcryptjs": "^3.0.2",
     "dotenv": "^17.2.2",
     "drizzle-orm": "^1.0.0-beta.22",
     "express": "^5.1.0",
-    "mysql2": "^3.14.4"
+    "serverless-http": "^4.0.0"
   },
   "devDependencies": {
     "drizzle-kit": "^1.0.0-beta.22"
