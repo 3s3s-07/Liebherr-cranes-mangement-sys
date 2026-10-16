@@ -3,191 +3,15 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const bcrypt = require("bcryptjs");
-const mysql = require("mysql2/promise");
+const pool = require("./db/query");
 const { buildXlsx, excelDate, STYLE } = require("./xlsx-writer");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const pool = mysql.createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10
-});
-
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 app.use(express.static(path.join(__dirname, "public")));
-
-async function ensureMaintenanceTable() {
-    // نقرأ نوع عمود cranes.id الفعلي عشان crane_id يطابقه (INT أو INT UNSIGNED أو غيره)
-    const [cols] = await pool.query(
-        `SELECT COLUMN_TYPE AS column_type
-         FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cranes' AND COLUMN_NAME = 'id'`
-    );
-    const idType = cols.length ? String(cols[0].column_type || cols[0].COLUMN_TYPE) : "INT UNSIGNED";
-
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS crane_maintenance_records (
-            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            crane_id ${idType} NOT NULL,
-            maintenance_date DATE NOT NULL,
-            problem_cause VARCHAR(500) NOT NULL,
-            repaired_by VARCHAR(255) NOT NULL,
-            spare_part_used VARCHAR(500) NULL,
-            cost_egp DECIMAL(12,2) NOT NULL DEFAULT 0,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_crane_maintenance_crane_id (crane_id),
-            CONSTRAINT fk_crane_maintenance_crane
-                FOREIGN KEY (crane_id) REFERENCES cranes(id)
-                ON DELETE CASCADE
-        )
-    `);
-
-    // أعمدة الفاتورة (PDF) - تتضاف لو مش موجودة
-    const invoiceCols = [
-        ["invoice_name", "VARCHAR(255) NULL"],
-        ["invoice_data", "LONGBLOB NULL"]
-    ];
-    for (const [column, definition] of invoiceCols) {
-        try {
-            await pool.query(`ALTER TABLE crane_maintenance_records ADD COLUMN ${column} ${definition}`);
-        } catch (error) {
-            if (error.errno !== 1060 && error.code !== "ER_DUP_FIELDNAME") {
-                console.error(`Schema update for ${column} failed:`, error.message);
-            }
-        }
-    }
-}
-
-async function ensureFinanceTable() {
-    const [cols] = await pool.query(
-        `SELECT COLUMN_TYPE AS column_type
-         FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cranes' AND COLUMN_NAME = 'id'`
-    );
-    const idType = cols.length ? String(cols[0].column_type || cols[0].COLUMN_TYPE) : "INT UNSIGNED";
-
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS crane_finance_transactions (
-            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            crane_id ${idType} NOT NULL,
-            type ENUM('revenue','expense') NOT NULL,
-            transaction_date DATE NOT NULL,
-            amount DECIMAL(14,2) NOT NULL,
-            details VARCHAR(500) NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_crane_finance_crane_date (crane_id, transaction_date),
-            CONSTRAINT fk_crane_finance_crane
-                FOREIGN KEY (crane_id) REFERENCES cranes(id)
-                ON DELETE CASCADE
-        )
-    `);
-}
-
-async function ensureCertificatesTable() {
-    const [cols] = await pool.query(
-        `SELECT COLUMN_TYPE AS column_type
-         FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cranes' AND COLUMN_NAME = 'id'`
-    );
-    const idType = cols.length ? String(cols[0].column_type || cols[0].COLUMN_TYPE) : "INT UNSIGNED";
-
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS crane_certificates (
-            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            crane_id ${idType} NOT NULL,
-            certificate_name VARCHAR(255) NOT NULL,
-            issue_date DATE NOT NULL,
-            expire_date DATE NOT NULL,
-            file_name VARCHAR(255) NULL,
-            file_data LONGBLOB NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_crane_certificates_crane_id (crane_id),
-            CONSTRAINT fk_crane_certificates_crane
-                FOREIGN KEY (crane_id) REFERENCES cranes(id)
-                ON DELETE CASCADE
-        )
-    `);
-
-    // لو الجدول كان موجود قبل كده من غير أعمدة الـ PDF
-    for (const [column, definition] of [["file_name", "VARCHAR(255) NULL"], ["file_data", "LONGBLOB NULL"]]) {
-        try {
-            await pool.query(`ALTER TABLE crane_certificates ADD COLUMN ${column} ${definition}`);
-        } catch (error) {
-            if (error.errno !== 1060 && error.code !== "ER_DUP_FIELDNAME") {
-                console.error(`Schema update for certificates.${column} failed:`, error.message);
-            }
-        }
-    }
-}
-
-async function ensurePersonsTables() {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS persons (
-            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
-            role VARCHAR(150) NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_persons_name (name)
-        )
-    `);
-
-    // معاملات الشخص (مصروفات / دفعات) - هتتستخدم في صفحة Open Account
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS person_transactions (
-            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            person_id INT UNSIGNED NOT NULL,
-            type ENUM('expense','payment') NOT NULL,
-            transaction_date DATE NOT NULL,
-            amount DECIMAL(14,2) NOT NULL,
-            details VARCHAR(500) NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_person_transactions_person (person_id),
-            CONSTRAINT fk_person_transactions_person
-                FOREIGN KEY (person_id) REFERENCES persons(id)
-                ON DELETE CASCADE
-        )
-    `);
-}
-
-async function ensureCompanyTable() {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS company_transactions (
-            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            category ENUM('ahmed','abdalla','ayman','aly','general','revenue') NOT NULL,
-            transaction_date DATE NOT NULL,
-            amount DECIMAL(14,2) NOT NULL,
-            details VARCHAR(500) NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_company_tx_date (transaction_date)
-        )
-    `);
-}
-
-async function ensureSchema() {
-    // These columns are added only if they don't already exist.
-    const additions = [
-        ["maintenance_details", "TEXT NULL"],
-        ["finance_details", "TEXT NULL"],
-        ["image_data", "LONGTEXT NULL"]
-    ];
-
-    for (const [column, definition] of additions) {
-        try {
-            await pool.query(`ALTER TABLE cranes ADD COLUMN ${column} ${definition}`);
-        } catch (error) {
-            // MySQL error 1060 = duplicate column; ignore it.
-            if (error.errno !== 1060 && error.code !== "ER_DUP_FIELDNAME") {
-                console.error(`Schema update for ${column} failed:`, error.message);
-            }
-        }
-    }
-}
 
 // تسجيل الدخول
 app.post("/api/login", async (req, res) => {
@@ -198,7 +22,7 @@ app.post("/api/login", async (req, res) => {
         }
 
         const [rows] = await pool.execute(
-            `SELECT id, username, email, password_hash, role, is_active FROM users WHERE username = ? OR email = ? LIMIT 1`,
+            `SELECT id, username, email, password_hash, role, is_active FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?) LIMIT 1`,
             [username, username]
         );
 
@@ -222,7 +46,7 @@ app.post("/api/login", async (req, res) => {
             user: { id: user.id, username: user.username, email: user.email, role: user.role }
         });
     } catch (error) {
-        console.error(error);
+        console.error("Login failed:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database/server error." });
     }
 });
@@ -233,7 +57,7 @@ app.get("/api/cranes", async (req, res) => {
         const [rows] = await pool.query("SELECT * FROM cranes ORDER BY id DESC");
         res.json({ success: true, cranes: rows });
     } catch (error) {
-        console.error("Error fetching cranes:", error);
+        console.error("Error fetching cranes:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching cranes." });
     }
 });
@@ -248,7 +72,7 @@ app.get("/api/cranes/:id", async (req, res) => {
 
         res.json({ success: true, crane: cranes[0] });
     } catch (error) {
-        console.error("Error fetching crane:", error);
+        console.error("Error fetching crane:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching crane." });
     }
 });
@@ -277,7 +101,7 @@ app.patch("/api/cranes/:id/status-location", async (req, res) => {
 
         res.json({ success: true, message: "Crane status and location updated." });
     } catch (error) {
-        console.error("Error updating crane status/location:", error);
+        console.error("Error updating crane status/location:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while updating crane." });
     }
 });
@@ -302,7 +126,7 @@ app.patch("/api/cranes/:id/details", async (req, res) => {
         await pool.execute(`UPDATE cranes SET ${fields.join(", ")} WHERE id = ?`, values);
         res.json({ success: true, message: "Details saved successfully." });
     } catch (error) {
-        console.error("Error saving crane details:", error);
+        console.error("Error saving crane details:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while saving details." });
     }
 });
@@ -311,7 +135,7 @@ app.patch("/api/cranes/:id/details", async (req, res) => {
 app.get("/api/cranes/:id/maintenance", async (req, res) => {
     try {
         const [rows] = await pool.execute(
-            `SELECT id, crane_id, DATE_FORMAT(maintenance_date, '%Y-%m-%d') AS maintenance_date,
+            `SELECT id, crane_id, TO_CHAR(maintenance_date, 'YYYY-MM-DD') AS maintenance_date,
                     problem_cause, repaired_by, spare_part_used, cost_egp,
                     invoice_name, (invoice_name IS NOT NULL) AS has_invoice
              FROM crane_maintenance_records
@@ -321,7 +145,7 @@ app.get("/api/cranes/:id/maintenance", async (req, res) => {
         );
         res.json({ success: true, records: rows });
     } catch (error) {
-        console.error("Error fetching maintenance records:", error);
+        console.error("Error fetching maintenance records:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching maintenance records." });
     }
 });
@@ -354,7 +178,7 @@ app.post("/api/cranes/:id/maintenance", async (req, res) => {
         );
         res.json({ success: true, message: "Maintenance record added.", record_id: result.insertId });
     } catch (error) {
-        console.error("Error adding maintenance record:", error);
+        console.error("Error adding maintenance record:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while adding maintenance record." });
     }
 });
@@ -385,7 +209,7 @@ app.post(
             }
             res.json({ success: true, message: "Invoice uploaded." });
         } catch (error) {
-            console.error("Error uploading invoice:", error);
+            console.error("Error uploading invoice:", error.code || "SERVER_ERROR");
             res.status(500).json({ success: false, message: "Database error while uploading invoice." });
         }
     }
@@ -408,7 +232,7 @@ app.get("/api/cranes/:id/maintenance/:recordId/invoice", async (req, res) => {
         });
         res.send(rows[0].invoice_data);
     } catch (error) {
-        console.error("Error fetching invoice:", error);
+        console.error("Error fetching invoice:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching invoice." });
     }
 });
@@ -422,7 +246,7 @@ app.delete("/api/cranes/:id/maintenance/:recordId/invoice", async (req, res) => 
         );
         res.json({ success: true, message: "Invoice removed." });
     } catch (error) {
-        console.error("Error removing invoice:", error);
+        console.error("Error removing invoice:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while removing invoice." });
     }
 });
@@ -435,7 +259,7 @@ app.delete("/api/cranes/:id/maintenance/:recordId", async (req, res) => {
         );
         res.json({ success: true, message: "Maintenance record deleted." });
     } catch (error) {
-        console.error("Error deleting maintenance record:", error);
+        console.error("Error deleting maintenance record:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while deleting maintenance record." });
     }
 });
@@ -483,8 +307,8 @@ app.post("/api/cranes", async (req, res) => {
 
         res.json({ success: true, message: "Crane added successfully." });
     } catch (error) {
-        console.error("Error inserting crane:", error);
-        if (error.code === "ER_DUP_ENTRY") {
+        console.error("Error inserting crane:", error.code || "SERVER_ERROR");
+        if (error.code === "23505") {
             return res.status(400).json({ success: false, message: "Serial Number already exists." });
         }
         res.status(500).json({ success: false, message: "Database error: " + error.message });
@@ -536,8 +360,8 @@ app.put("/api/cranes/:id", async (req, res) => {
         }
         res.json({ success: true, message: "Crane updated successfully." });
     } catch (error) {
-        console.error("Error updating crane:", error);
-        if (error.code === "ER_DUP_ENTRY") {
+        console.error("Error updating crane:", error.code || "SERVER_ERROR");
+        if (error.code === "23505") {
             return res.status(400).json({ success: false, message: "Serial Number already exists." });
         }
         res.status(500).json({ success: false, message: "Database error: " + error.message });
@@ -553,7 +377,7 @@ app.delete("/api/cranes/:id", async (req, res) => {
         }
         res.json({ success: true, message: "Crane deleted." });
     } catch (error) {
-        console.error("Error deleting crane:", error);
+        console.error("Error deleting crane:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while deleting crane." });
     }
 });
@@ -566,7 +390,7 @@ app.get("/api/cranes/:id/finance", async (req, res) => {
             return res.status(400).json({ success: false, message: "Year must be between 2008 and 2040." });
         }
         const [rows] = await pool.execute(
-            `SELECT id, type, DATE_FORMAT(transaction_date, '%Y-%m-%d') AS transaction_date, amount, details
+            `SELECT id, type, TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date, amount, details
              FROM crane_finance_transactions
              WHERE crane_id = ? AND transaction_date >= ? AND transaction_date <= ?
              ORDER BY transaction_date ASC, id ASC`,
@@ -574,7 +398,7 @@ app.get("/api/cranes/:id/finance", async (req, res) => {
         );
         res.json({ success: true, year, transactions: rows });
     } catch (error) {
-        console.error("Error fetching finance transactions:", error);
+        console.error("Error fetching finance transactions:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching finance data." });
     }
 });
@@ -615,7 +439,7 @@ app.post("/api/cranes/:id/finance", async (req, res) => {
         );
         res.json({ success: true, message: type === "revenue" ? "Revenue added." : "Expense added." });
     } catch (error) {
-        console.error("Error adding finance transaction:", error);
+        console.error("Error adding finance transaction:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while adding transaction." });
     }
 });
@@ -628,7 +452,7 @@ app.delete("/api/cranes/:id/finance/:txId", async (req, res) => {
         );
         res.json({ success: true, message: "Transaction deleted." });
     } catch (error) {
-        console.error("Error deleting finance transaction:", error);
+        console.error("Error deleting finance transaction:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while deleting transaction." });
     }
 });
@@ -645,8 +469,8 @@ app.get("/api/cranes/:id/certificates", async (req, res) => {
     try {
         const [rows] = await pool.execute(
             `SELECT id, crane_id, certificate_name,
-                    DATE_FORMAT(issue_date, '%Y-%m-%d') AS issue_date,
-                    DATE_FORMAT(expire_date, '%Y-%m-%d') AS expire_date,
+                    TO_CHAR(issue_date, 'YYYY-MM-DD') AS issue_date,
+                    TO_CHAR(expire_date, 'YYYY-MM-DD') AS expire_date,
                     file_name, (file_name IS NOT NULL) AS has_file
              FROM crane_certificates
              WHERE crane_id = ?
@@ -655,7 +479,7 @@ app.get("/api/cranes/:id/certificates", async (req, res) => {
         );
         res.json({ success: true, certificates: rows });
     } catch (error) {
-        console.error("Error fetching certificates:", error);
+        console.error("Error fetching certificates:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching certificates." });
     }
 });
@@ -679,7 +503,7 @@ app.post("/api/cranes/:id/certificates", async (req, res) => {
         );
         res.json({ success: true, message: "Certificate added.", certificate_id: result.insertId });
     } catch (error) {
-        console.error("Error adding certificate:", error);
+        console.error("Error adding certificate:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while adding certificate." });
     }
 });
@@ -692,7 +516,7 @@ app.delete("/api/cranes/:id/certificates/:certId", async (req, res) => {
         );
         res.json({ success: true, message: "Certificate deleted." });
     } catch (error) {
-        console.error("Error deleting certificate:", error);
+        console.error("Error deleting certificate:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while deleting certificate." });
     }
 });
@@ -722,7 +546,7 @@ app.post(
             }
             res.json({ success: true, message: "Certificate PDF uploaded." });
         } catch (error) {
-            console.error("Error uploading certificate PDF:", error);
+            console.error("Error uploading certificate PDF:", error.code || "SERVER_ERROR");
             res.status(500).json({ success: false, message: "Database error while uploading certificate PDF." });
         }
     }
@@ -743,7 +567,7 @@ app.get("/api/cranes/:id/certificates/:certId/file", async (req, res) => {
         });
         res.send(rows[0].file_data);
     } catch (error) {
-        console.error("Error fetching certificate PDF:", error);
+        console.error("Error fetching certificate PDF:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching certificate PDF." });
     }
 });
@@ -756,7 +580,7 @@ app.delete("/api/cranes/:id/certificates/:certId/file", async (req, res) => {
         );
         res.json({ success: true, message: "Certificate PDF removed." });
     } catch (error) {
-        console.error("Error removing certificate PDF:", error);
+        console.error("Error removing certificate PDF:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while removing certificate PDF." });
     }
 });
@@ -766,7 +590,7 @@ app.get("/api/summary", async (req, res) => {
     try {
         // السنين المتاحة من المعاملات
         const [yearRows] = await pool.query(
-            `SELECT DISTINCT YEAR(transaction_date) AS y
+            `SELECT DISTINCT EXTRACT(YEAR FROM transaction_date)::integer AS y
              FROM crane_finance_transactions
              ORDER BY y DESC`
         );
@@ -777,7 +601,7 @@ app.get("/api/summary", async (req, res) => {
         const year = Number.isInteger(yearNum) && yearNum >= 2000 && yearNum <= 2100 ? yearNum : null;
 
         // الرافعات + المالية + الصيانة لكل رافعة
-        const financeFilter = year ? "AND YEAR(transaction_date) = ?" : "";
+        const financeFilter = year ? "AND EXTRACT(YEAR FROM transaction_date)::integer = ?" : "";
         const params = year ? [year] : [];
 
         const [craneRows] = await pool.query(
@@ -836,7 +660,7 @@ app.get("/api/summary", async (req, res) => {
         // آخر سجلات الصيانة
         const [recentRows] = await pool.query(
             `SELECT r.crane_id, c.model_name, c.serial_number,
-                    DATE_FORMAT(r.maintenance_date, '%Y-%m-%d') AS maintenance_date,
+                    TO_CHAR(r.maintenance_date, 'YYYY-MM-DD') AS maintenance_date,
                     r.problem_cause, r.repaired_by, r.cost_egp
              FROM crane_maintenance_records r
              JOIN cranes c ON c.id = r.crane_id
@@ -848,11 +672,11 @@ app.get("/api/summary", async (req, res) => {
         // تنبيهات الشهادات (منتهية أو هتنتهي خلال شهر)
         const [certRows] = await pool.query(
             `SELECT cc.crane_id, c.model_name, c.serial_number, cc.certificate_name,
-                    DATE_FORMAT(cc.expire_date, '%Y-%m-%d') AS expire_date,
-                    DATEDIFF(cc.expire_date, CURDATE()) AS days_left
+                    TO_CHAR(cc.expire_date, 'YYYY-MM-DD') AS expire_date,
+                    (cc.expire_date - CURRENT_DATE) AS days_left
              FROM crane_certificates cc
              JOIN cranes c ON c.id = cc.crane_id
-             WHERE cc.expire_date <= DATE_ADD(CURDATE(), INTERVAL 1 MONTH)
+             WHERE cc.expire_date <= (CURRENT_DATE + INTERVAL '1 month')
              ORDER BY cc.expire_date ASC`
         );
         const items = certRows.map((x) => ({ ...x, days_left: Number(x.days_left) }));
@@ -874,7 +698,7 @@ app.get("/api/summary", async (req, res) => {
             certificate_alerts
         });
     } catch (error) {
-        console.error("Error building summary:", error);
+        console.error("Error building summary:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while building summary." });
     }
 });
@@ -905,7 +729,7 @@ app.get("/api/persons", async (req, res) => {
         });
         res.json({ success: true, persons });
     } catch (error) {
-        console.error("Error fetching persons:", error);
+        console.error("Error fetching persons:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching persons." });
     }
 });
@@ -929,7 +753,7 @@ app.post("/api/persons", async (req, res) => {
         );
         res.json({ success: true, message: "Person added.", person_id: result.insertId });
     } catch (error) {
-        console.error("Error adding person:", error);
+        console.error("Error adding person:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while adding person." });
     }
 });
@@ -948,7 +772,7 @@ app.put("/api/persons/:id", async (req, res) => {
         }
         res.json({ success: true, message: "Person updated." });
     } catch (error) {
-        console.error("Error updating person:", error);
+        console.error("Error updating person:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while updating person." });
     }
 });
@@ -958,7 +782,7 @@ app.delete("/api/persons/:id", async (req, res) => {
         await pool.execute("DELETE FROM persons WHERE id = ?", [req.params.id]);
         res.json({ success: true, message: "Person deleted." });
     } catch (error) {
-        console.error("Error deleting person:", error);
+        console.error("Error deleting person:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while deleting person." });
     }
 });
@@ -1081,7 +905,7 @@ app.post("/api/persons/export", async (req, res) => {
 
         let people;
         if (ids.length) {
-            [people] = await pool.query("SELECT id, name, role FROM persons WHERE id IN (?) ORDER BY id ASC", [ids]);
+            [people] = await pool.query("SELECT id, name, role FROM persons WHERE id = ANY(?) ORDER BY id ASC", [ids]);
         } else {
             [people] = await pool.query("SELECT id, name, role FROM persons ORDER BY id ASC");
         }
@@ -1089,9 +913,9 @@ app.post("/api/persons/export", async (req, res) => {
         let txs = [];
         if (people.length) {
             [txs] = await pool.query(
-                `SELECT person_id, type, DATE_FORMAT(transaction_date, '%Y-%m-%d') AS transaction_date, amount, details
+                `SELECT person_id, type, TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date, amount, details
                  FROM person_transactions
-                 WHERE person_id IN (?)
+                 WHERE person_id = ANY(?)
                  ORDER BY person_id ASC, transaction_date ASC, id ASC`,
                 [people.map((p) => p.id)]
             );
@@ -1178,7 +1002,7 @@ app.post("/api/persons/export", async (req, res) => {
         });
         res.send(buffer);
     } catch (error) {
-        console.error("Error exporting persons:", error);
+        console.error("Error exporting persons:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Could not generate the Excel file." });
     }
 });
@@ -1191,7 +1015,7 @@ app.get("/api/persons/:id/account", async (req, res) => {
             return res.status(404).json({ success: false, message: "Person not found." });
         }
         const [rows] = await pool.execute(
-            `SELECT id, type, DATE_FORMAT(transaction_date, '%Y-%m-%d') AS transaction_date, amount, details
+            `SELECT id, type, TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date, amount, details
              FROM person_transactions
              WHERE person_id = ?
              ORDER BY transaction_date DESC, id DESC`,
@@ -1207,7 +1031,7 @@ app.get("/api/persons/:id/account", async (req, res) => {
             totals: { total_expenses, total_payments, balance: total_expenses - total_payments }
         });
     } catch (error) {
-        console.error("Error fetching person account:", error);
+        console.error("Error fetching person account:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching the account." });
     }
 });
@@ -1239,7 +1063,7 @@ app.post("/api/persons/:id/transactions", async (req, res) => {
         );
         res.json({ success: true, message: type === "expense" ? "Expense added." : "Payment added." });
     } catch (error) {
-        console.error("Error adding person transaction:", error);
+        console.error("Error adding person transaction:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while adding the transaction." });
     }
 });
@@ -1252,7 +1076,7 @@ app.delete("/api/persons/:id/transactions/:txId", async (req, res) => {
         );
         res.json({ success: true, message: "Transaction deleted." });
     } catch (error) {
-        console.error("Error deleting person transaction:", error);
+        console.error("Error deleting person transaction:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while deleting the transaction." });
     }
 });
@@ -1267,7 +1091,7 @@ app.get("/api/company", async (req, res) => {
             return res.status(400).json({ success: false, message: "Valid from/to dates are required." });
         }
         const [rows] = await pool.execute(
-            `SELECT id, category, DATE_FORMAT(transaction_date, '%Y-%m-%d') AS transaction_date, amount, details
+            `SELECT id, category, TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date, amount, details
              FROM company_transactions
              WHERE transaction_date >= ? AND transaction_date <= ?
              ORDER BY transaction_date ASC, id ASC`,
@@ -1275,7 +1099,7 @@ app.get("/api/company", async (req, res) => {
         );
         res.json({ success: true, transactions: rows.map((r) => ({ ...r, amount: Number(r.amount) })) });
     } catch (error) {
-        console.error("Error fetching company transactions:", error);
+        console.error("Error fetching company transactions:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while fetching company transactions." });
     }
 });
@@ -1301,7 +1125,7 @@ app.post("/api/company", async (req, res) => {
         );
         res.json({ success: true, message: "Transaction added." });
     } catch (error) {
-        console.error("Error adding company transaction:", error);
+        console.error("Error adding company transaction:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while adding the transaction." });
     }
 });
@@ -1311,7 +1135,7 @@ app.delete("/api/company/:id", async (req, res) => {
         await pool.execute("DELETE FROM company_transactions WHERE id = ?", [req.params.id]);
         res.json({ success: true, message: "Transaction deleted." });
     } catch (error) {
-        console.error("Error deleting company transaction:", error);
+        console.error("Error deleting company transaction:", error.code || "SERVER_ERROR");
         res.status(500).json({ success: false, message: "Database error while deleting the transaction." });
     }
 });
@@ -1323,21 +1147,8 @@ app.use((err, req, res, next) => {
     next(err);
 });
 
-async function start() {
-    try {
-        await ensureSchema();
-        await ensureMaintenanceTable();
-        await ensureFinanceTable();
-        await ensureCertificatesTable();
-        await ensurePersonsTables();
-        await ensureCompanyTable();
-        app.listen(PORT, () => {
-            console.log(`Liebherr website running on http://localhost:${PORT}`);
-        });
-    } catch (error) {
-        console.error("Could not initialize database schema:", error);
-        process.exit(1);
-    }
+// Netlify imports the app without opening a listening socket.
+module.exports = app;
+if (require.main === module) {
+    app.listen(PORT, () => console.log(`Liebherr website running on port ${PORT}`));
 }
-
-start();
