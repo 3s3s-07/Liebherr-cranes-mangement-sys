@@ -13,6 +13,19 @@ app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
+// Verify the deployment's database and schema without exposing connection details.
+app.get("/api/health", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    try {
+        await pool.query("SELECT id FROM users LIMIT 0");
+        await pool.query("SELECT id FROM cranes LIMIT 0");
+        res.json({ success: true, status: "ready" });
+    } catch (error) {
+        console.error("Health check failed:", error.code || "DATABASE_UNAVAILABLE");
+        res.status(503).json({ success: false, status: "unavailable", message: "The application database is unavailable. Please contact the site administrator." });
+    }
+});
+
 // تسجيل الدخول
 app.post("/api/login", async (req, res) => {
     try {
@@ -1140,11 +1153,20 @@ app.delete("/api/company/:id", async (req, res) => {
     }
 });
 
+app.use("/api", (req, res) => {
+    res.status(404).json({ success: false, message: "API endpoint not found." });
+});
+
 app.use((err, req, res, next) => {
     if (err && err.type === "entity.too.large") {
         return res.status(413).json({ success: false, message: "File is too large (max 10 MB)." });
     }
-    next(err);
+    if (err && err.type === "entity.parse.failed") {
+        return res.status(400).json({ success: false, message: "Invalid JSON request." });
+    }
+    if (!req.path.startsWith("/api/")) return next(err);
+    console.error("API request failed:", err.code || "SERVER_ERROR");
+    res.status(500).json({ success: false, message: "The server could not complete this request." });
 });
 
 // Netlify imports the app without opening a listening socket.

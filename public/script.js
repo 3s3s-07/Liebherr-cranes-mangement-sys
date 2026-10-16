@@ -40,9 +40,15 @@ document.addEventListener('DOMContentLoaded', () => {
           body: JSON.stringify(payload)
         });
 
+        if (!(res.headers.get('content-type') || '').includes('application/json')) {
+          errorMsg.textContent = res.status === 401 || res.status === 403
+            ? 'Netlify visitor access protection is blocking the site. The site owner needs to update Visitor access settings in Netlify.'
+            : 'The login API is unavailable. Please contact the site administrator.';
+          return;
+        }
         const data = await res.json();
 
-        if (res.ok && (data.success || data.token || res.status === 200)) {
+        if (res.ok && data.success === true && data.user) {
           try { if (data.user) localStorage.setItem('cmsUser', JSON.stringify(data.user)); } catch (e) {}
           window.location.href = data.redirectUrl || '/dashboard.html';
         } else {
